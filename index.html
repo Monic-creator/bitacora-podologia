@@ -105,6 +105,7 @@ const Trash2 = (p) => <Icon {...p} path={<><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h
 const Edit2 = (p) => <Icon {...p} path={<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>} />;
 const Download = (p) => <Icon {...p} path={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></>} />;
 const FileText = (p) => <Icon {...p} path={<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></>} />;
+const Users = (p) => <Icon {...p} path={<><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></>} />;
 
 const SERVICIOS = {
   basico: { label: 'Servicio básico', precio: 350 },
@@ -137,13 +138,38 @@ function diasRestantes(dateStr) {
   return Math.round((fecha - hoy) / (1000 * 60 * 60 * 24));
 }
 
+function obtenerPacientesUnicos(citas) {
+  const mapa = new Map();
+  // Recorremos de más reciente a más antiguo para quedarnos con el dato más actual de cada paciente
+  const ordenadas = [...citas].sort((a, b) => (b.fecha + (b.hora||'')).localeCompare(a.fecha + (a.hora||'')));
+  for (const c of ordenadas) {
+    const key = (c.nombre || '').trim().toLowerCase();
+    if (!key) continue;
+    if (!mapa.has(key)) {
+      mapa.set(key, {
+        nombre: c.nombre,
+        telefono: c.telefono,
+        direccion: c.direccion,
+        edad: c.edad,
+        sexo: c.sexo,
+        observaciones: c.observaciones,
+        ultimaFecha: c.fecha,
+        totalCitas: 0,
+      });
+    }
+    mapa.get(key).totalCitas += 1;
+  }
+  return Array.from(mapa.values()).sort((a, b) => a.nombre.localeCompare(b.nombre));
+}
+
 const STORAGE_KEY = 'bitacora-citas-v1';
 
 function App() {
   const [citas, setCitas] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [view, setView] = useState('agenda'); // agenda | seguimiento | nueva | detalle
+  const [view, setView] = useState('agenda'); // agenda | seguimiento | nueva | detalle | pacientes
   const [citaActiva, setCitaActiva] = useState(null);
+  const [pacientePrecargado, setPacientePrecargado] = useState(null);
   const [busqueda, setBusqueda] = useState('');
   const [saveError, setSaveError] = useState(false);
 
@@ -199,8 +225,11 @@ function App() {
 
   const proximasASeguimiento = useMemo(() => {
     return citas
-      .filter(c => c.estado === 'completada' && c.proximoSeguimiento)
-      .map(c => ({ ...c, dias: diasRestantes(c.proximoSeguimiento) }))
+      .filter(c => c.estado === 'completada')
+      .map(c => {
+        const fechaSeguimiento = c.proximoSeguimiento || addWeeks(c.fecha, 4);
+        return { ...c, proximoSeguimiento: fechaSeguimiento, dias: diasRestantes(fechaSeguimiento) };
+      })
       .filter(c => c.dias <= 7)
       .sort((a, b) => a.dias - b.dias);
   }, [citas]);
@@ -217,13 +246,25 @@ function App() {
     return citas.filter(c => c.estado === 'completada' && !c.pagado);
   }, [citas]);
 
+  const pacientesUnicos = useMemo(() => obtenerPacientesUnicos(citas), [citas]);
+
+  const conteoGenero = useMemo(() => {
+    const m = { femenino: 0, masculino: 0, sinDato: 0 };
+    pacientesUnicos.forEach(p => {
+      if (p.sexo === 'femenino') m.femenino += 1;
+      else if (p.sexo === 'masculino') m.masculino += 1;
+      else m.sinDato += 1;
+    });
+    return m;
+  }, [pacientesUnicos]);
+
   function exportarRespaldo() {
-    const headers = ['Nombre', 'Telefono', 'Direccion', 'Fecha', 'Hora', 'Estado', 'Servicios', 'Costo', 'Pagado', 'Observaciones', 'ProximoSeguimiento'];
+    const headers = ['Nombre', 'Edad', 'Sexo', 'Telefono', 'Direccion', 'Fecha', 'Hora', 'Estado', 'Servicios', 'CostoCalculado', 'CostoFinal', 'Pagado', 'Observaciones', 'ProximoSeguimiento'];
     const filas = citas.map(c => {
       const serviciosTxt = Object.keys(SERVICIOS).filter(k => c.servicios?.[k]).map(k => SERVICIOS[k].label).join(' + ');
       return [
-        c.nombre, c.telefono, c.direccion, c.fecha, c.hora,
-        c.estado, serviciosTxt, c.costo, c.pagado ? 'Si' : 'No',
+        c.nombre, c.edad || '', c.sexo || '', c.telefono, c.direccion, c.fecha, c.hora,
+        c.estado, serviciosTxt, c.costo, (c.costoFinal ?? c.costo), c.pagado ? 'Si' : 'No',
         (c.observaciones || '').replace(/\n/g, ' '), c.proximoSeguimiento || ''
       ].map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',');
     });
@@ -263,13 +304,23 @@ function App() {
           totalMes={totalMes}
           pendientesCobro={pendientesCobro}
           proximasASeguimiento={proximasASeguimiento}
+          conteoGenero={conteoGenero}
           busqueda={busqueda}
           setBusqueda={setBusqueda}
-          onNueva={() => { setCitaActiva(null); setView('nueva'); }}
+          onNueva={() => { setCitaActiva(null); setPacientePrecargado(null); setView('nueva'); }}
           onSeleccionar={(c) => { setCitaActiva(c); setView('detalle'); }}
           onVerSeguimiento={() => setView('seguimiento')}
+          onVerPacientes={() => setView('pacientes')}
           saveError={saveError}
           onExportar={exportarRespaldo}
+        />
+      )}
+
+      {view === 'pacientes' && (
+        <PacientesView
+          pacientes={pacientesUnicos}
+          onVolver={() => setView('agenda')}
+          onAgendar={(p) => { setPacientePrecargado(p); setCitaActiva(null); setView('nueva'); }}
         />
       )}
 
@@ -284,8 +335,9 @@ function App() {
       {view === 'nueva' && (
         <FormView
           citaInicial={null}
+          pacientePrecargado={pacientePrecargado}
           onGuardar={guardarCita}
-          onCancelar={() => setView('agenda')}
+          onCancelar={() => { setPacientePrecargado(null); setView('agenda'); }}
         />
       )}
 
@@ -298,12 +350,25 @@ function App() {
           onMarcarCompletada={(c) => guardarCita(c)}
           onMarcarPagada={(c) => guardarCita(c)}
           onCancelarCita={(c) => guardarCita(c)}
+          onAgendarSiguiente={() => {
+            setPacientePrecargado({
+              nombre: citaActiva.nombre,
+              telefono: citaActiva.telefono,
+              direccion: citaActiva.direccion,
+              edad: citaActiva.edad,
+              sexo: citaActiva.sexo,
+              observaciones: citaActiva.observaciones,
+            });
+            setCitaActiva(null);
+            setView('nueva');
+          }}
         />
       )}
 
       {view === 'editar' && citaActiva && (
         <FormView
           citaInicial={citaActiva}
+          pacientePrecargado={null}
           onGuardar={guardarCita}
           onCancelar={() => setView('detalle')}
         />
@@ -312,7 +377,7 @@ function App() {
   );
 }
 
-function AgendaView({ citas, totalMes, pendientesCobro, proximasASeguimiento, busqueda, setBusqueda, onNueva, onSeleccionar, onVerSeguimiento, saveError, onExportar }) {
+function AgendaView({ citas, totalMes, pendientesCobro, proximasASeguimiento, conteoGenero, busqueda, setBusqueda, onNueva, onSeleccionar, onVerSeguimiento, onVerPacientes, saveError, onExportar }) {
   return (
     <div style={styles.screen}>
       <header style={styles.header}>
@@ -353,6 +418,15 @@ function AgendaView({ citas, totalMes, pendientesCobro, proximasASeguimiento, bu
           </div>
         </div>
       </div>
+
+      <button style={styles.pacientesBtn} onClick={onVerPacientes}>
+        <Users size={17} color="#3a7d6c" />
+        <span style={{ flex: 1, textAlign: 'left' }}>
+          Ver mis pacientes <b>({conteoGenero.femenino + conteoGenero.masculino + conteoGenero.sinDato})</b>
+        </span>
+        <span style={styles.generoTag}>♀ {conteoGenero.femenino}</span>
+        <span style={styles.generoTag}>♂ {conteoGenero.masculino}</span>
+      </button>
 
       {proximasASeguimiento.length > 0 && (
         <button style={styles.seguimientoBanner} onClick={onVerSeguimiento}>
@@ -437,7 +511,7 @@ function SeguimientoView({ lista, onVolver, onSeleccionar }) {
         <h1 style={styles.h1Small}>Seguimiento</h1>
       </header>
 
-      <p style={styles.sectionDesc}>Pacientes con cita sugerida en los próximos 7 días, según su última visita.</p>
+      <p style={styles.sectionDesc}>Pacientes con cita de seguimiento sugerida en los próximos 7 días (4 semanas después de su última visita), incluyendo historial completo.</p>
 
       <div style={styles.list}>
         {lista.length === 0 && (
@@ -471,8 +545,10 @@ function SeguimientoView({ lista, onVolver, onSeleccionar }) {
   );
 }
 
-function DetalleView({ cita, onEditar, onEliminar, onVolver, onMarcarCompletada, onMarcarPagada, onCancelarCita }) {
+function DetalleView({ cita, onEditar, onEliminar, onVolver, onMarcarCompletada, onMarcarPagada, onCancelarCita, onAgendarSiguiente }) {
   const [confirmarBorrar, setConfirmarBorrar] = useState(false);
+  const costoFinal = cita.costoFinal ?? cita.costo;
+  const hayAjuste = cita.costoFinal != null && cita.costoFinal !== cita.costo;
 
   return (
     <div style={styles.screen}>
@@ -484,8 +560,16 @@ function DetalleView({ cita, onEditar, onEliminar, onVolver, onMarcarCompletada,
 
       <div style={styles.detailCard}>
         <h2 style={styles.detailName}>{cita.nombre}</h2>
-        <div style={{ ...styles.estadoPill, ...(cita.estado === 'completada' ? styles.estadoCompletada : cita.estado === 'cancelada' ? styles.estadoCancelada : styles.estadoProgramada) }}>
-          {cita.estado === 'completada' ? 'Completada' : cita.estado === 'cancelada' ? 'Cancelada' : 'Programada'}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+          <div style={{ ...styles.estadoPill, margin: 0, ...(cita.estado === 'completada' ? styles.estadoCompletada : cita.estado === 'cancelada' ? styles.estadoCancelada : styles.estadoProgramada) }}>
+            {cita.estado === 'completada' ? 'Completada' : cita.estado === 'cancelada' ? 'Cancelada' : 'Programada'}
+          </div>
+          {cita.edad && (
+            <div style={styles.infoPill}>{cita.edad} años</div>
+          )}
+          {cita.sexo && (
+            <div style={styles.infoPill}>{cita.sexo === 'femenino' ? '♀ Femenino' : '♂ Masculino'}</div>
+          )}
         </div>
 
         <div style={styles.detailGrid}>
@@ -506,9 +590,15 @@ function DetalleView({ cita, onEditar, onEliminar, onVolver, onMarcarCompletada,
             </div>
           ))}
           <div style={styles.totalLine}>
-            <span>Total</span>
+            <span>Total calculado</span>
             <span>${cita.costo}</span>
           </div>
+          {hayAjuste && (
+            <div style={{ ...styles.totalLine, color: '#d4874a', borderTop: 'none', paddingTop: 0 }}>
+              <span>Cobrado realmente</span>
+              <span>${costoFinal}</span>
+            </div>
+          )}
         </div>
 
         {cita.observaciones && (
@@ -547,6 +637,12 @@ function DetalleView({ cita, onEditar, onEliminar, onVolver, onMarcarCompletada,
           </button>
         )}
 
+        {cita.estado === 'completada' && (
+          <button style={styles.secondaryAction} onClick={onAgendarSiguiente}>
+            <Calendar size={18} /> Agendar siguiente cita
+          </button>
+        )}
+
         {!confirmarBorrar ? (
           <button style={styles.ghostAction} onClick={() => setConfirmarBorrar(true)}>
             <Trash2 size={16} /> Eliminar registro
@@ -577,14 +673,70 @@ function DetailRow({ icon, label, value }) {
   );
 }
 
-function FormView({ citaInicial, onGuardar, onCancelar }) {
-  const [nombre, setNombre] = useState(citaInicial?.nombre || '');
-  const [telefono, setTelefono] = useState(citaInicial?.telefono || '');
-  const [direccion, setDireccion] = useState(citaInicial?.direccion || '');
+function PacientesView({ pacientes, onVolver, onAgendar }) {
+  const [q, setQ] = useState('');
+  const filtrados = pacientes.filter(p => p.nombre.toLowerCase().includes(q.toLowerCase()));
+
+  return (
+    <div style={styles.screen}>
+      <header style={styles.headerSimple}>
+        <button style={styles.backBtn} onClick={onVolver}><ChevronLeft size={22} color="#1e2d2a" /></button>
+        <h1 style={styles.h1Small}>Mis pacientes</h1>
+      </header>
+
+      <div style={styles.searchBox}>
+        <Search size={17} color="#94a3a8" />
+        <input
+          style={styles.searchInput}
+          placeholder="Buscar por nombre…"
+          value={q}
+          onChange={e => setQ(e.target.value)}
+        />
+      </div>
+
+      <div style={styles.list}>
+        {filtrados.length === 0 && (
+          <div style={styles.empty}>
+            <Users size={36} color="#c8d4d2" />
+            <p style={styles.emptyText}>No se encontraron pacientes</p>
+          </div>
+        )}
+        {filtrados.map(p => (
+          <div key={p.nombre} style={styles.pacienteCard}>
+            <div style={styles.cardTop}>
+              <span style={styles.cardName}>{p.nombre}</span>
+              {p.sexo && <span style={styles.generoTag}>{p.sexo === 'femenino' ? '♀' : '♂'}</span>}
+            </div>
+            <div style={styles.cardRow}>
+              {p.edad && <span style={styles.cardMeta}>{p.edad} años · </span>}
+              <Phone size={13} color="#7a8e8a" />
+              <span style={styles.cardMeta}>{p.telefono || 'Sin teléfono'}</span>
+            </div>
+            <div style={styles.cardRow}>
+              <span style={styles.cardMeta}>{p.totalCitas} cita{p.totalCitas !== 1 ? 's' : ''} · Última: {formatFecha(p.ultimaFecha)}</span>
+            </div>
+            <button style={styles.agendarBtn} onClick={() => onAgendar(p)}>
+              <Plus size={15} /> Agendar nueva cita
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FormView({ citaInicial, pacientePrecargado, onGuardar, onCancelar }) {
+  const base = citaInicial || pacientePrecargado || {};
+  const [nombre, setNombre] = useState(base.nombre || '');
+  const [telefono, setTelefono] = useState(base.telefono || '');
+  const [direccion, setDireccion] = useState(base.direccion || '');
+  const [edad, setEdad] = useState(base.edad || '');
+  const [sexo, setSexo] = useState(base.sexo || '');
   const [fecha, setFecha] = useState(citaInicial?.fecha || new Date().toISOString().split('T')[0]);
   const [hora, setHora] = useState(citaInicial?.hora || '');
   const [servicios, setServicios] = useState(citaInicial?.servicios || { basico: true, unaEncarnada: false, anestesia: false });
-  const [observaciones, setObservaciones] = useState(citaInicial?.observaciones || '');
+  const [observaciones, setObservaciones] = useState(base.observaciones || '');
+  const [costoFinalTexto, setCostoFinalTexto] = useState(citaInicial?.costoFinal != null ? String(citaInicial.costoFinal) : '');
   const [error, setError] = useState('');
 
   const costo = calcularCosto(servicios);
@@ -597,15 +749,20 @@ function FormView({ citaInicial, onGuardar, onCancelar }) {
     if (!nombre.trim()) { setError('Escribe el nombre del paciente'); return; }
     if (!fecha) { setError('Selecciona una fecha'); return; }
 
+    const costoFinalNum = costoFinalTexto.trim() === '' ? null : Number(costoFinalTexto);
+
     onGuardar({
       ...(citaInicial || {}),
       nombre: nombre.trim(),
       telefono: telefono.trim(),
       direccion: direccion.trim(),
+      edad: edad ? Number(edad) : null,
+      sexo: sexo || null,
       fecha,
       hora,
       servicios,
       costo,
+      costoFinal: costoFinalNum,
       observaciones: observaciones.trim(),
       estado: citaInicial?.estado || 'programada',
       pagado: citaInicial?.pagado || false,
@@ -621,9 +778,28 @@ function FormView({ citaInicial, onGuardar, onCancelar }) {
       </header>
 
       <div style={styles.form}>
+        {pacientePrecargado && !citaInicial && (
+          <div style={styles.precargaBanner}>
+            <Check size={15} color="#3a7d6c" />
+            <span>Datos de {pacientePrecargado.nombre} cargados automáticamente</span>
+          </div>
+        )}
+
         <Field label="Nombre del paciente">
           <input style={styles.input} value={nombre} onChange={e => setNombre(e.target.value)} placeholder="Ej. María González" />
         </Field>
+
+        <div style={styles.fieldRow}>
+          <Field label="Edad" style={{ flex: 1 }}>
+            <input style={styles.input} type="number" min="0" max="120" value={edad} onChange={e => setEdad(e.target.value)} placeholder="Ej. 68" />
+          </Field>
+          <Field label="Sexo" style={{ flex: 1.4 }}>
+            <div style={styles.sexoToggleRow}>
+              <button type="button" style={{ ...styles.sexoToggle, ...(sexo === 'femenino' ? styles.sexoToggleActive : {}) }} onClick={() => setSexo(sexo === 'femenino' ? '' : 'femenino')}>♀ Femenino</button>
+              <button type="button" style={{ ...styles.sexoToggle, ...(sexo === 'masculino' ? styles.sexoToggleActive : {}) }} onClick={() => setSexo(sexo === 'masculino' ? '' : 'masculino')}>♂ Masculino</button>
+            </div>
+          </Field>
+        </div>
 
         <Field label="Teléfono">
           <input style={styles.input} value={telefono} onChange={e => setTelefono(e.target.value)} placeholder="Ej. 5512345678" type="tel" />
@@ -659,9 +835,20 @@ function FormView({ citaInicial, onGuardar, onCancelar }) {
         </Field>
 
         <div style={styles.costoBox}>
-          <span>Costo total</span>
+          <span>Costo calculado</span>
           <span style={styles.costoValor}>${costo}</span>
         </div>
+
+        <Field label="Costo final cobrado (opcional)">
+          <input
+            style={styles.input}
+            type="number"
+            min="0"
+            value={costoFinalTexto}
+            onChange={e => setCostoFinalTexto(e.target.value)}
+            placeholder={`Solo si cobraste diferente a $${costo}`}
+          />
+        </Field>
 
         <Field label="Observaciones">
           <textarea
@@ -736,6 +923,37 @@ const styles = {
   statCardWarn: { backgroundColor: '#fdf3e9', border: '1px solid #f0d9b8' },
   statValue: { fontSize: 18, fontWeight: 700, lineHeight: 1.1 },
   statLabel: { fontSize: 11, color: '#7a8e8a', marginTop: 2 },
+  pacientesBtn: {
+    width: '100%', backgroundColor: '#fff', border: '1px solid #e8e4da', borderRadius: 14, padding: '13px 16px',
+    display: 'flex', alignItems: 'center', gap: 8, color: '#1e2d2a', fontSize: 13.5, fontWeight: 600,
+    marginBottom: 12, cursor: 'pointer',
+  },
+  generoTag: { fontSize: 11.5, fontWeight: 700, color: '#5a6e6a', backgroundColor: '#eef2f0', padding: '3px 8px', borderRadius: 100 },
+  infoPill: { fontSize: 11.5, fontWeight: 600, color: '#5a6e6a', backgroundColor: '#eef2f0', padding: '4px 11px', borderRadius: 100 },
+  precargaBanner: {
+    display: 'flex', alignItems: 'center', gap: 8, backgroundColor: '#eef6f3', color: '#2d5a4d',
+    padding: '11px 14px', borderRadius: 10, fontSize: 13, fontWeight: 500,
+  },
+  sexoToggleRow: { display: 'flex', gap: 6 },
+  sexoToggle: {
+    flex: 1, padding: '11px 8px', borderRadius: 10, border: '1.5px solid #e0dccf', backgroundColor: '#fff',
+    fontSize: 12.5, fontWeight: 600, color: '#7a8e8a', cursor: 'pointer', whiteSpace: 'nowrap',
+  },
+  sexoToggleActive: { borderColor: '#3a7d6c', backgroundColor: '#eef6f3', color: '#1e2d2a' },
+  pacienteCard: {
+    backgroundColor: '#fff', border: '1px solid #e8e4da', borderRadius: 14, padding: '14px 16px',
+    display: 'flex', flexDirection: 'column', gap: 6,
+  },
+  agendarBtn: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 8,
+    backgroundColor: '#eef6f3', color: '#2d5a4d', border: 'none', borderRadius: 10, padding: '10px',
+    fontSize: 13, fontWeight: 700, cursor: 'pointer',
+  },
+  secondaryAction: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#eef6f3',
+    color: '#2d5a4d', border: '1px solid #cfe3dc', borderRadius: 14, padding: '14px', fontSize: 14.5,
+    fontWeight: 700, cursor: 'pointer',
+  },
   seguimientoBanner: {
     width: '100%', backgroundColor: '#d4874a', border: 'none', borderRadius: 14, padding: '14px 16px',
     display: 'flex', alignItems: 'center', gap: 10, color: '#fff', fontSize: 14, fontWeight: 600,
